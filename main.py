@@ -117,7 +117,7 @@ async def agent_stream_generator(prompt: str, history: List[Dict[str, Any]]) -> 
         yield format_sse("error", {"message": f"Anthropic API Error: {e.message}"})
     except Exception as e:
         # Prevents stream crash on generic Python exceptions
-        print("STREAM EXCEPTION TRACEBACKS:")
+        print("STREAM EXCEPTION TRACEBACK:")
         traceback.print_exc()
         yield format_sse("error", {"message": f"Internal Error: {str(e)}"})
 
