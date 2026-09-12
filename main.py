@@ -1,5 +1,6 @@
 import json
 import os
+from pydoc import text
 import traceback
 from typing import AsyncGenerator, List, Dict, Any
 from fastapi import FastAPI
@@ -47,8 +48,24 @@ class ChatRequest(BaseModel):
     prompt: str
     history: List[Dict[str, Any]] = []
 
+### Use this for custom SSE formatting
 def format_sse(event_type: str, data: Dict[str, Any]) -> str:
     return f"data: {json.dumps({'type': event_type, **data})}\n\n"
+
+### Use this
+def format_sse_ag_ui(event_type: str, data: Dict[str, Any]) -> str:
+    return f"data: {json.dumps({'type': event_type, **data})}\n\n"
+    
+def get_ag_ui_event_type(event_type: str) -> str:
+    mapping = {
+        "text_delta": "TEXT_MESSAGE_CONTENT",
+        "tool_start": "TOOL_CALL_START",
+        "tool_result": "TOOL_CALL_END",
+        "done": "RUN_FINISHED",
+        "error": "error"
+    }
+    return mapping.get(event_type, "unknown")
+
 
 async def agent_stream_generator(prompt: str, history: List[Dict[str, Any]]) -> AsyncGenerator[str, None]:
     try:
@@ -64,7 +81,11 @@ async def agent_stream_generator(prompt: str, history: List[Dict[str, Any]]) -> 
         ) as stream:
             async for event in stream:
                 if event.type == "text":
-                    yield format_sse("text_delta", {"text": event.text})
+                  yield format_sse_ag_ui("TEXT_MESSAGE_CONTENT", {
+                   "messageId": "msg_001",
+                   "delta": text
+                  })  
+                ##  yield format_sse("text_delta", {"text": event.text})
             
             # Retrieve final message snapshot safely after stream completes
             final_message = await stream.get_final_message()
@@ -80,14 +101,20 @@ async def agent_stream_generator(prompt: str, history: List[Dict[str, Any]]) -> 
                     tool_name = block.name
                     tool_args = block.input
                     tool_id = block.id
+                    yield format_sse_ag_ui("TOOL_CALL_START", {
+                        "toolCallId": tool_id,
+                        "name": tool_name,
+                        "args": tool_args
+                    })
 
-                    yield format_sse("tool_start", {"tool": tool_name, "args": tool_args, "id": tool_id})
+                   ## yield format_sse("tool_start", {"tool": tool_name, "args": tool_args, "id": tool_id})
 
                     func = TOOL_FUNCTIONS.get(tool_name)
                     raw_result = func(**tool_args) if func else json.dumps({"error": "Tool not found"})
                     
                     parsed_result = json.loads(raw_result)
-                    yield format_sse("tool_result", {"tool": tool_name, "result": parsed_result, "id": tool_id})
+                    yield format_sse_ag_ui("TOOL_CALL_END", { "toolCallId": tool_id, "result": parsed_result })
+                    ## yield format_sse("tool_result", {"tool": tool_name, "result": parsed_result, "id": tool_id})
 
                     tool_results_content.append({
                         "type": "tool_result",
@@ -108,9 +135,11 @@ async def agent_stream_generator(prompt: str, history: List[Dict[str, Any]]) -> 
             ) as stream:
                 async for event in stream:
                     if event.type == "text":
-                        yield format_sse("text_delta", {"text": event.text})
+                        yield format_sse_ag_ui("TEXT_MESSAGE_CONTENT", { "messageId": "msg_002", "delta": event.text })
+                        ## yield format_sse("text_delta", {"text": event.text})
 
-        yield format_sse("done", {})
+        yield format_sse_ag_ui("RUN_FINISHED", { "runId": "run_001" })
+        ## yield format_sse("done", {})
 
     except APIError as e:
         # Catches Anthropic Auth/Rate Limit/Invalid Request errors safely
