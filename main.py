@@ -1,13 +1,10 @@
-import json
 import os
-from pydoc import text
-import traceback
-from typing import AsyncGenerator, List, Dict, Any
-from fastapi import FastAPI
+import json
+from typing import Dict, Any, List
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
-from anthropic import AsyncAnthropic, APIError
+from fastapi.responses import JSONResponse
+from anthropic import AsyncAnthropic
 
 app = FastAPI()
 
@@ -19,143 +16,125 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 1. Provide API key explicitly or ensure env var is set
-client = AsyncAnthropic()
+# --- DISCOVERY & RUNTIME INFO (Resolves 404 on load) ---
+@app.get("/info")
+@app.get("/api/info")
+@app.get("/api/chat/stream/info")
+async def get_runtime_info():
+    return JSONResponse(
+        content={
+            "version": "1.0.0",
+            "agents": {
+                "default": {
+                    "name": "default",
+                    "description": "AG-UI Stream Agent"
+                }
+            }
+        }
+    )
 
-# 2. Local Tool
-def get_stock_price(ticker: str) -> str:
-    prices = {"AAPL": "185.50 USD", "GOOGL": "175.20 USD", "NVDA": "120.40 USD"}
-    price = prices.get(ticker.upper(), "Ticker not found")
-    return json.dumps({"ticker": ticker, "price": price})
+# --- AGENT STREAM EXECUTION ---
+@app.post("/api/agents/{agent_id}/run")
+@app.post("/api/{agent_id}/run")
+@app.post("/api/chat/stream")
+async def run_agent(request: Request, agent_id: str = "default"):
+    body = await request.json()
+    raw_messages = body.get("messages", [])
+    prompt = body.get("prompt", "")
 
-TOOL_FUNCTIONS = {"get_stock_price": get_stock_price}
+    # Execute your streaming generator here
+    return StreamingResponse(
+        agent_stream_generator(prompt, raw_messages),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
+
+anthropic_client = AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+MODEL_NAME = "claude-sonnet-4-5"
 
 TOOLS_SCHEMA = [
     {
         "name": "get_stock_price",
-        "description": "Retrieves current real-time stock price for a given ticker symbol.",
+        "description": "Retrieves real-time stock price for a given ticker symbol.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "ticker": {"type": "string", "description": "Stock symbol (e.g. NVDA)"}
+                "ticker": {"type": "string", "description": "Stock symbol (e.g., AAPL, NVDA)"}
             },
             "required": ["ticker"]
         }
     }
 ]
 
-class ChatRequest(BaseModel):
-    prompt: str
-    history: List[Dict[str, Any]] = []
-
-### Use this for custom SSE formatting
-def format_sse(event_type: str, data: Dict[str, Any]) -> str:
-    return f"data: {json.dumps({'type': event_type, **data})}\n\n"
-
-### Use this
-def format_sse_ag_ui(event_type: str, data: Dict[str, Any]) -> str:
-    return f"data: {json.dumps({'type': event_type, **data})}\n\n"
-    
-def get_ag_ui_event_type(event_type: str) -> str:
-    mapping = {
-        "text_delta": "TEXT_MESSAGE_CONTENT",
-        "tool_start": "TOOL_CALL_START",
-        "tool_result": "TOOL_CALL_END",
-        "done": "RUN_FINISHED",
-        "error": "error"
+def execute_stock_tool(ticker: str) -> Dict[str, str]:
+    prices = {"NVDA": "$135.50", "AAPL": "$224.30", "MSFT": "$448.90"}
+    clean_ticker = ticker.upper()
+    return {
+        "ticker": clean_ticker,
+        "price": prices.get(clean_ticker, "$180.00")
     }
-    return mapping.get(event_type, "unknown")
 
+@app.post("/api/chat")
+async def chat_endpoint(request: Request):
+    body = await request.json()
+    prompt = body.get("prompt", "")
+    history = body.get("messages", [])
 
-async def agent_stream_generator(prompt: str, history: List[Dict[str, Any]]) -> AsyncGenerator[str, None]:
-    try:
-        messages = list(history)
-        messages.append({"role": "user", "content": prompt})
+    formatted_messages = []
+    for m in history:
+        role = m.get("role", "user")
+        content = m.get("content", "")
+        if content:
+            formatted_messages.append({"role": role, "content": content})
 
-        # --- FIRST PASS: Stream Claude's initial turn ---
-        async with client.messages.stream(
-            model="claude-sonnet-4-5",
-            max_tokens=1024,
-            tools=TOOLS_SCHEMA,
-            messages=messages,
-        ) as stream:
-            async for event in stream:
-                if event.type == "text":
-                  yield format_sse_ag_ui("TEXT_MESSAGE_CONTENT", {
-                   "messageId": "msg_001",
-                   "delta": text
-                  })  
-                ##  yield format_sse("text_delta", {"text": event.text})
-            
-            # Retrieve final message snapshot safely after stream completes
-            final_message = await stream.get_final_message()
+    if not formatted_messages or formatted_messages[-1]["content"] != prompt:
+        formatted_messages.append({"role": "user", "content": prompt})
 
-        messages.append({"role": "assistant", "content": final_message.content})
-
-        # --- SECOND PASS: Tool Handling ---
-        if final_message.stop_reason == "tool_use":
-            tool_results_content = []
-
-            for block in final_message.content:
-                if block.type == "tool_use":
-                    tool_name = block.name
-                    tool_args = block.input
-                    tool_id = block.id
-                    yield format_sse_ag_ui("TOOL_CALL_START", {
-                        "toolCallId": tool_id,
-                        "name": tool_name,
-                        "args": tool_args
-                    })
-
-                   ## yield format_sse("tool_start", {"tool": tool_name, "args": tool_args, "id": tool_id})
-
-                    func = TOOL_FUNCTIONS.get(tool_name)
-                    raw_result = func(**tool_args) if func else json.dumps({"error": "Tool not found"})
-                    
-                    parsed_result = json.loads(raw_result)
-                    yield format_sse_ag_ui("TOOL_CALL_END", { "toolCallId": tool_id, "result": parsed_result })
-                    ## yield format_sse("tool_result", {"tool": tool_name, "result": parsed_result, "id": tool_id})
-
-                    tool_results_content.append({
-                        "type": "tool_result",
-                        "tool_use_id": tool_id,
-                        "content": raw_result
-                    })
-
-            messages.append({"role": "user", "content": tool_results_content})
-
-            # Stream Claude's post-tool answer
-            # My addition: this feeds the tool_results back into the model for a final response -
-            # this is important for the model to generate a coherent final answer after tool usage.
-            async with client.messages.stream(
-                model="claude-sonnet-4-5",
-                max_tokens=1024,
-                tools=TOOLS_SCHEMA,
-                messages=messages,
-            ) as stream:
-                async for event in stream:
-                    if event.type == "text":
-                        yield format_sse_ag_ui("TEXT_MESSAGE_CONTENT", { "messageId": "msg_002", "delta": event.text })
-                        ## yield format_sse("text_delta", {"text": event.text})
-
-        yield format_sse_ag_ui("RUN_FINISHED", { "runId": "run_001" })
-        ## yield format_sse("done", {})
-
-    except APIError as e:
-        # Catches Anthropic Auth/Rate Limit/Invalid Request errors safely
-        yield format_sse("error", {"message": f"Anthropic API Error: {e.message}"})
-    except Exception as e:
-        # Prevents stream crash on generic Python exceptions
-        print("STREAM EXCEPTION TRACEBACKS:")
-        traceback.print_exc()
-        yield format_sse("error", {"message": f"Internal Error: {str(e)}"})
-
-@app.post("/api/chat/stream")
-async def chat_stream_endpoint(request: ChatRequest):
-    return StreamingResponse(
-        agent_stream_generator(request.prompt, request.history),
-        media_type="text/event-stream"
+    response = await anthropic_client.messages.create(
+        model=MODEL_NAME,
+        max_tokens=1024,
+        messages=formatted_messages,
+        tools=TOOLS_SCHEMA,
     )
+
+    stock_data = None
+    response_text = ""
+
+    for block in response.content:
+        if block.type == "text":
+            response_text += block.text
+        elif block.type == "tool_use" and block.name == "get_stock_price":
+            ticker = block.input.get("ticker", "AAPL")
+            stock_data = execute_stock_tool(ticker)
+            
+            # Followup request to summarize with tool output
+            formatted_messages.append({"role": "assistant", "content": response.content})
+            formatted_messages.append({
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": json.dumps(stock_data)
+                }]
+            })
+
+            followup = await anthropic_client.messages.create(
+                model=MODEL_NAME,
+                max_tokens=1024,
+                messages=formatted_messages
+            )
+            for f_block in followup.content:
+                if f_block.type == "text":
+                    response_text += f_block.text
+
+    return JSONResponse({
+        "text": response_text,
+        "stock_data": stock_data
+    })
 
 if __name__ == "__main__":
     import uvicorn
