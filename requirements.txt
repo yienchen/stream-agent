@@ -13,6 +13,8 @@ faiss-cpu==1.8.0
 
 # MCP
 mcp[cli]==1.5.0
+# CopilotKit SDK
+copilotkit==0.1.96
 
 # Utilities
 Pydantic==2.7.0

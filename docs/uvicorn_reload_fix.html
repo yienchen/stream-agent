@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Uvicorn Reload Fix</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      line-height: 1.6;
+      margin: 40px;
+      color: #222;
+      background: #f8f8f8;
+    }
+    h2, h3 {
+      color: #111;
+    }
+    code {
+      background: #eee;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-family: Consolas, monospace;
+    }
+    pre {
+      background: #111;
+      color: #f5f5f5;
+      padding: 16px;
+      border-radius: 8px;
+      overflow-x: auto;
+    }
+    .note {
+      background: #fff3cd;
+      border-left: 4px solid #ffb703;
+      padding: 12px 16px;
+      margin: 16px 0;
+    }
+  </style>
+</head>
+<body>
+  <h2>Cause</h2>
+  <p>The problem is in <code>weather/weatheragent.py</code>: you are starting uvicorn with an app object while also enabling reload:</p>
+  <pre><code>uvicorn.run(app, host="127.0.0.1", port=8001, reload=True)</code></pre>
+  <p>Uvicorn explicitly requires an import string when <code>reload=True</code> or <code>workers</code> is used, such as:</p>
+  <pre><code>uvicorn.run("weatheragent:app", reload=True)</code></pre>
+
+  <h2>Correct ways to run it</h2>
+
+  <h3>Option 1: Best for reload</h3>
+  <p>From the folder that contains the file:</p>
+  <pre><code>cd C:\Users\yienc\projects\stream-agent\weather
+python -m uvicorn weatheragent:app --host 127.0.0.1 --port 8001 --reload</code></pre>
+  <p>This works because <code>weatheragent</code> is importable as a module name in that directory.</p>
+
+  <h3>Option 2: Run the file directly without reload</h3>
+  <p>If you want to keep it as a script, remove <code>reload=True</code>:</p>
+  <pre><code>if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="127.0.0.1", port=8001)</code></pre>
+  <p>Then run:</p>
+  <pre><code>cd C:\Users\yienc\projects\stream-agent\weather
+python .\weatheragent.py</code></pre>
+
+  <h2>Recommended fix for your file</h2>
+  <p>Change this in <code>weather/weatheragent.py</code>:</p>
+  <pre><code>uvicorn.run(app, host="127.0.0.1", port=8001, reload=True)</code></pre>
+  <p>to either:</p>
+  <pre><code>uvicorn.run("weatheragent:app", host="127.0.0.1", port=8001, reload=True)</code></pre>
+  <p>or remove <code>reload=True</code> if you just want a normal server.</p>
+
+  <div class="note">
+    The key rule is: <strong><code>reload=True</code> requires an import string, not the app object itself.</strong>
+  </div>
+</body>
+</html>
