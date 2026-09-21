@@ -13,6 +13,7 @@ CopilotKit *runtime's* job, not this server's.
     uvicorn agui_server:app --host 127.0.0.1 --port 8007 --reload
 """
 
+import json
 import logging
 import uuid
 
@@ -32,6 +33,7 @@ from ag_ui.core import (
     TextMessageStartEvent,
     ToolCallArgsEvent,
     ToolCallEndEvent,
+    ToolCallResultEvent,
     ToolCallStartEvent,
 )
 from ag_ui.encoder import EventEncoder
@@ -58,8 +60,11 @@ app.add_middleware(
 
 anthropic_client = AsyncAnthropic()
 
+# Name must match `name` in the frontend's useRenderTool({ name: ... })
+# call — that's how CopilotKit routes this tool call to WeatherCard
+# instead of falling back to default rendering.
 WEATHER_TOOL = {
-    "name": "get_weather_data",
+    "name": "get_weather",
     "description": "Fetch current weather for a location.",
     "input_schema": {
         "type": "object",
@@ -70,7 +75,13 @@ WEATHER_TOOL = {
 
 
 async def execute_weather_lookup(location: str) -> dict:
-    return {"location": location, "temperature": "72F", "condition": "Sunny"}
+    # Keys here must match the props WeatherCard destructures.
+    return {
+        "location": location,
+        "temperature": "72F",
+        "condition": "Sunny",
+        "humidity": "48%",
+    }
 
 
 def to_anthropic_messages(input_data: RunAgentInput) -> list[dict]:
@@ -173,31 +184,21 @@ async def agent_endpoint(input_data: RunAgentInput, request: Request):
                             type=EventType.TOOL_CALL_END, tool_call_id=block.id
                         )
                     )
-                    # Server-side tool: run it and report the result as text.
+                    # Server-side tool: run it and attach the result to
+                    # THIS tool call as structured JSON, via
+                    # ToolCallResultEvent — not a narrated text message.
+                    # useRenderTool's `result` prop is populated straight
+                    # from this event's `content`, parsed as JSON.
                     result = await execute_weather_lookup(
                         block.input.get("location", "")
                     )
-                    result_id = str(uuid.uuid4())
                     yield encoder.encode(
-                        TextMessageStartEvent(
-                            type=EventType.TEXT_MESSAGE_START,
-                            message_id=result_id,
-                            role="assistant",
-                        )
-                    )
-                    yield encoder.encode(
-                        TextMessageContentEvent(
-                            type=EventType.TEXT_MESSAGE_CONTENT,
-                            message_id=result_id,
-                            delta=(
-                                f"{result['location']}: {result['temperature']}, "
-                                f"{result['condition']}."
-                            ),
-                        )
-                    )
-                    yield encoder.encode(
-                        TextMessageEndEvent(
-                            type=EventType.TEXT_MESSAGE_END, message_id=result_id
+                        ToolCallResultEvent(
+                            type=EventType.TOOL_CALL_RESULT,
+                            message_id=str(uuid.uuid4()),
+                            tool_call_id=block.id,
+                            role="tool",
+                            content=json.dumps(result),
                         )
                     )
 
