@@ -10,7 +10,7 @@ No /info, no sdk.info(), no agent registry. Discovery is the
 CopilotKit *runtime's* job, not this server's.
 
     pip install ag-ui-protocol fastapi uvicorn anthropic
-    uvicorn agui_server:app --host 127.0.0.1 --port 8007 --reload
+    uvicorn agui_server:app --host 127.0.0.1 --port 8008 --reload
 """
 
 import json
@@ -97,6 +97,9 @@ def to_anthropic_messages(input_data: RunAgentInput) -> list[dict]:
 
 @app.post("/agent")
 async def agent_endpoint(input_data: RunAgentInput, request: Request):
+
+    ## logger.log(logging.INFO, f"agent run: json={json.dumps(input_data)}")
+
     encoder = EventEncoder(accept=request.headers.get("accept"))
 
     async def event_generator():
@@ -229,4 +232,4 @@ async def health():
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="127.0.0.1", port=8007)
+    uvicorn.run(app, host="127.0.0.1", port=8008)
